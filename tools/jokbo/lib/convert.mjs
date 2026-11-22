@@ -1,14 +1,11 @@
-// 족보 HWPX/HWP → 머리말·본문·급분바 .md (+ 강조.json, images/*.webp)
+// 족보 HWPX/HWP → 구성.json·머리말·급분바·문족·본문·전체 .md (+ 강조.json, images/*.webp). 파싱은 늘 전부, 무엇을 먼저 읽을지는 구성.json read_order
 import { parse, blocksToMarkdown } from 'kordoc'; import JSZip from 'jszip'; import sharp from 'sharp';
 import fs from 'fs'; import path from 'path';
 const OUT=process.argv[2], INPUTS=process.argv.slice(3);
 const files=INPUTS.flatMap(d=>fs.statSync(d).isDirectory()?fs.readdirSync(d).filter(f=>/\.hwpx?$/i.test(f)).sort().map(f=>path.join(d,f)):[d]);
 
-// ---------- sections
-const ROMAN=/^(Ⅰ|Ⅱ|Ⅲ|Ⅳ|Ⅴ|Ⅵ|Ⅶ|Ⅷ|Ⅸ|Ⅹ|Ⅺ|Ⅻ|X{0,1}(?:IX|IV|V?I{0,3}))\.?$/;
-const cleanTitle=t=>t.split('\n')[0].replace(/\s+(\d{2})?(교수님|족원|족장|족|교)\)\s.*$/,'').trim();
-const hdr=b=>{ if(b.type!=='table'||b.table.rows!==1||b.table.cols!==2) return null; const [a,t]=b.table.cells[0].map(c=>(c.text||'').trim()); return a&&ROMAN.test(a)&&t?{num:a,title:cleanTitle(t)}:null; };
-const kindOf=t=>/분바/.test(t)?'summary':/문족/.test(t)?'exam':/(확인|자작|예상)\s*문제/.test(t)?'practice':'body';
+// ---------- sections (lib/sections.mjs)
+import { splitSections, KIND_KO, isQuestionRow, hdr } from './sections.mjs';
 
 // ---------- box-table unwrapping
 const IMGRE=/!\[[^\]]*\]\([^)]+\)/g;
@@ -98,22 +95,31 @@ for(const fp of files){
   const r=await parse(buf,{});
   const paras=await readStyles(isHwp? await toHwpx(buf) : buf);
   const base=path.basename(fp).replace(/\.hwpx?$/i,''), od=path.join(OUT,base);
-  try{ fs.rmSync(path.join(od,'images'),{recursive:true,force:true}); }catch{} fs.mkdirSync(path.join(od,'images'),{recursive:true});
-  // images
-  const rename={}; let a=0,b=0;
-  for(const im of r.images||[]){ const nm=im.filename.replace(/\.[^.]+$/,'.webp'); let out;
-    try{ out=await sharp(im.data).resize({width:1600,height:1600,fit:'inside',withoutEnlargement:true}).webp({quality:85}).toBuffer(); }catch{ out=null; }
-    const name=out?nm:im.filename; fs.writeFileSync(path.join(od,'images',name), out||im.data); rename[im.filename]=name; a+=im.data.length; b+=(out||im.data).length; }
-  const fixImg=md=>md.replace(/image_\d+\.[a-z]+/g,m=>rename[m]||m);
   // sections
-  const secOf=[]; const secs=[{num:'0',title:'머리말',kind:'prelude',blocks:[]}];
-  for(const blk of r.blocks){ const h=hdr(blk); if(h) secs.push({...h,kind:kindOf(h.title),blocks:[]}); else secs.at(-1).blocks.push(blk); secOf.push(h?null:secs.at(-1)); }
+  const { secs, secOf, headerStyle, hasSummary } = splitSections(r.blocks);
   const {hit,miss,emph}=applyMarks(r.blocks, paras, secOf);
-  const md=kinds=>finishMd(fixImg(secs.filter(s=>kinds.includes(s.kind)).map(s=>(s.kind==='prelude'?'':`## ${s.num}. ${s.title}\n\n`)+blocksToMarkdown(unwrap(s.blocks))).join('\n\n')));
-  for(const [name,kinds] of [['머리말',['prelude']],['본문',['body']],['급분바',['summary']]]){ fs.writeFileSync(path.join(od,name+'.md'), md(kinds)); try{ fs.rmSync(path.join(od,name+'.원본표.md'),{force:true}); }catch{} }
+  const OUTS=[['머리말',['prelude']],['급분바',['summary']],['문족',['exam','practice']],['본문',['body']]];
+  const keepKinds=new Set(OUTS.flatMap(o=>o[1]));
+  const raw={}; for(const [name,kinds] of OUTS) raw[name]=secs.filter(s=>kinds.includes(s.kind)).map(s=>(s.kind==='prelude'?'':`## ${s.num}. ${s.title}\n\n`)+blocksToMarkdown(unwrap(s.blocks))).join('\n\n');
+  // md 가 쓰는 그림만 (안 쓰는 그림은 버린다)
+  const used=new Set(); const addRefs=t=>{ for(const m of (t||'').matchAll(/image_\d+\.[a-z]+/g)) used.add(m[0]); };
+  Object.values(raw).forEach(addRefs); addRefs(r.markdown);
+  // images
+  try{ fs.rmSync(path.join(od,'images'),{recursive:true,force:true}); }catch{} fs.mkdirSync(path.join(od,'images'),{recursive:true});
+  const rename={}; let a=0,b=0,kept=0;
+  for(const im of r.images||[]){ a+=im.data.length; if(!used.has(im.filename)) continue; kept++; const nm=im.filename.replace(/\.[^.]+$/,'.webp'); let out;
+    try{ out=await sharp(im.data).resize({width:1600,height:1600,fit:'inside',withoutEnlargement:true}).webp({quality:85}).toBuffer(); }catch{ out=null; }
+    const name=out?nm:im.filename; fs.writeFileSync(path.join(od,'images',name), out||im.data); rename[im.filename]=name; b+=(out||im.data).length; }
+  const fixImg=md=>md.replace(/image_\d+\.[a-z]+/g,m=>rename[m]||m.replace(/\.[a-z]+$/,'.webp'));
+  for(const [name] of OUTS){ fs.writeFileSync(path.join(od,name+'.md'), finishMd(fixImg(raw[name]))); try{ fs.rmSync(path.join(od,name+'.원본표.md'),{force:true}); }catch{} }
   fs.writeFileSync(path.join(od,'전체.md'), finishMd(fixImg(r.markdown)));
-  fs.writeFileSync(path.join(od,'강조.json'), JSON.stringify({source:path.basename(fp), legend:{3:'王',2:'빨강·형광펜',1:'굵게',0:'곁말(회색)'}, items:emph},null,1));
-  const lv=l=>emph.filter(e=>e.level===l).length;
-  rep.push({file:base.slice(0,24), colorHit:`${hit}/${hit+miss}`, 王:lv(3), red_hl:lv(2), bold:lv(1), aside:lv(0), asideParas:r.blocks.filter(x=>x.quote).length, imgMB:`${(a/1e6).toFixed(1)}→${(b/1e6).toFixed(1)}`, s:((Date.now()-t0)/1000).toFixed(0)});
+  const imgsOf=s=>{ const set=new Set(); for(const blk of s.blocks) for(const m of JSON.stringify(blk.table?blk.table.cells.map(r=>r.map(c=>c.text)):blk.text||'').matchAll(/image_\d+\.[a-z]+/g)) set.add(m[0]); for(const blk of s.blocks) if(blk.type==='image') set.add('?'); return set.size; };
+  fs.writeFileSync(path.join(od,'구성.json'), JSON.stringify({source:path.basename(fp), header_style:headerStyle, has_summary:hasSummary,
+    // 먼저 읽을 것: 급분바가 잡히면 급분바·문족, 안 잡히면(fallback) 본문·문족. 본문은 필요할 때만
+    read_order: hasSummary? ['급분바.md','문족.md','본문.md'] : ['본문.md','문족.md'], fallback: !hasSummary,
+    sections:secs.map(s=>({num:s.num, title:s.title, kind:s.kind, kind_ko:KIND_KO[s.kind], decided_by:s.reason, chars:blocksToMarkdown(s.blocks).length, question_rows:s.questionRows, images:imgsOf(s), output: OUTS.find(o=>o[1].includes(s.kind))?.[0]??null}))},null,1));
+  fs.writeFileSync(path.join(od,'강조.json'), JSON.stringify({source:path.basename(fp), legend:{3:'王',2:'빨강·형광펜',1:'굵게',0:'곁말(회색)'}, items:emph.filter(e=>keepKinds.has(e.kind))},null,1));
+  const lv=l=>emph.filter(e=>e.level===l&&keepKinds.has(e.kind)).length;
+  rep.push({file:base.slice(0,24), kinds:secs.slice(1).map(s=>s.kind[0]+(s.reason==='content'?'*':'')).join(''), summary:hasSummary, colorHit:`${hit}/${hit+miss}`, 王:lv(3), red_hl:lv(2), imgs:`${kept}/${(r.images||[]).length}`, imgMB:`${(a/1e6).toFixed(1)}→${(b/1e6).toFixed(1)}`, s:((Date.now()-t0)/1000).toFixed(0)});
 }
 console.table(rep);

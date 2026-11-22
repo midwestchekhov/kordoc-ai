@@ -1,9 +1,7 @@
 import { parse } from 'kordoc'; import fs from 'fs'; import path from 'path';
 const dir=process.env.DIR, OUT=process.argv[2];
 const SUBJECT_BY_FOLDER={'소흡':'소화와 흡수'};
-const ROMAN=/^(Ⅰ|Ⅱ|Ⅲ|Ⅳ|Ⅴ|Ⅵ|Ⅶ|Ⅷ|Ⅸ|Ⅹ|Ⅺ|Ⅻ|X{0,1}(?:IX|IV|V?I{0,3}))\.?$/;
-const hdr=b=>{ if(b.type!=='table'||b.table.rows!==1||b.table.cols!==2) return null; const [a,t]=b.table.cells[0].map(c=>(c.text||'').trim()); return a&&ROMAN.test(a)&&t?{num:a,title:t}:null; };
-const kindOf=t=>/분바/.test(t)?'summary':/문족/.test(t)?'exam':/(확인|자작|예상)\s*문제/.test(t)?'practice':'body';
+import { splitSections, hdr } from './sections.mjs';
 const N=t=>(t||'').replace(/[➀-➄]/g,c=>String.fromCharCode(0x2460+c.charCodeAt(0)-0x2780));
 const IMG=/!\[[^\]]*\]\(([^)]+)\)/g, imgsIn=s=>[...(s||'').matchAll(IMG)].map(m=>m[1]), noImg=s=>(s||'').replace(IMG,'').replace(/\n{2,}/g,'\n').trim();
 const yr=s=>{ const m=/(20\d\d)\s*년/.exec(s||'')||/(?:^|\D)(\d\d)년/.exec(s||''); return m? (m[1].length===2? 2000+ +m[1] : +m[1]) : null; };
@@ -44,7 +42,7 @@ function collectImages(blocks, secOf){
   const add=(name,sec,ctx,where)=>{ const key=name+'|'+where; if(seen.has(key)) return; seen.add(key);
     const c=ctx.replace(/\s+\n/g,'\n').slice(0,500); out.push({file:name, section:sec.kind, section_title:`${sec.num}. ${sec.title}`, where, context:c, signal:judge(c),
       reasons:[...new Set([...(c.match(new RegExp(EMPH.source,'g'))||[]),...(c.match(new RegExp(PASS.source,'gi'))||[])])], professor_said: /교수님\)|교\)/.test(c)}); };
-  blocks.forEach((b,j)=>{ const sec=secOf[j];
+  blocks.forEach((b,j)=>{ const sec=secOf[j]; if(!sec) return;
     if(b.type==='image'){ const name=b.text?.match(/\(([^)]+)\)/)?.[1]||b.imageData?.filename||b.filename||`img@${j}`;
       const ctx=[blocks[j-1],blocks[j+1],blocks[j+2]].filter(x=>x&&x.type==='paragraph').map(x=>x.text).join('\n'); add(name,sec,ctx,'본문'); }
     if(b.type==='table'){ const cells=b.table.cells; cells.forEach((row,ri)=>row.forEach((cell,ci)=>{ for(const name of imgsIn(cell.text)){
@@ -57,11 +55,10 @@ const files=fs.readdirSync(dir).filter(f=>/\.hwpx?$/.test(f)).sort(); const summ
 for(const f of files){
   const r=await parse(fs.readFileSync(path.join(dir,f)),{imageFormat:'webp'});
   const fm=fileMeta(f,r.blocks); const base=f.replace(/\.hwpx?$/,''), od=path.join(OUT,base);
-  const secs=[{num:'0',title:'머리말',kind:'prelude'}]; const secOf=[];
-  for(const b of r.blocks){ const h=hdr(b); if(h) secs.push({...h,kind:kindOf(h.title)}); secOf.push(secs.at(-1)); }
+  const { secs, secOf, hasSummary } = splitSections(r.blocks);
   const bank=[]; let group=null, gProf=null, gYear=null, lastProf=null, curSec=null;
-  r.blocks.forEach((b,j)=>{ const s=secOf[j]; if(s!==curSec){ curSec=s; group=null; gProf=null; gYear=null; lastProf=null; }
-    if(s.kind!=='exam'&&s.kind!=='practice') return;
+  r.blocks.forEach((b,j)=>{ const s=secOf[j]; if(!s) return; if(s!==curSec){ curSec=s; group=null; gProf=null; gYear=null; lastProf=null; }
+    if(s.kind!=='exam'&&s.kind!=='practice'&&!s.questionRows) return;  // 문항 표가 섞인 다른 장도 문항은 뽑는다
     if(b.type==='paragraph' && /^Part\s*\d/i.test(b.text)){ lastProf=null; }
     if(b.type==='paragraph' && b.text.length<80 && (/^[A-Z]\.\s?\S/.test(b.text) || /(20\d\d|\d\d)\s*년.*(문족|문제|평가)/.test(b.text) || /(자작|확인|예상)\s*문제/.test(b.text))){
       group=b.text.trim(); gYear=yr(group); const p=profIn(group); if(p){ gProf=p; lastProf=p; } else gProf=null; }
@@ -71,13 +68,13 @@ for(const f of files){
       let profSrc='group', prof=gProf; if(!prof && lastProf){ prof=lastProf; profSrc='carried'; } if(!prof && (selfMade || gYear===2026)){ prof=fm.professor; profSrc='file'; }
       const qy=appearances(q.header)?.[0].year ?? yr(q.header) ?? gYear; if(!prof && fm.first_year && qy && qy>=fm.first_year){ prof=fm.professor; profSrc='first-year-rule'; } if(!prof){ prof=null; profSrc= /모름/.test(group||'')?'unknown':'unstated'; }
       const app=appearances(q.header);
-      bank.push({ id:`${base.slice(0,8)}-${fm.period}-${String(bank.length+1).padStart(3,'0')}`,
+      bank.push({ id:`${base.slice(0,8)}-${fm.period}-${String(bank.length+1).padStart(3,'0')}`, section:{num:s.num, title:s.title, kind:s.kind},
         meta:{ subject:fm.subject, lecture:fm.lecture, professor:prof, professor_source:profSrc, year: app?.[0].year ?? yr(q.header) ?? gYear ?? (selfMade?+fm.date.slice(0,4):null), exam: examIn(q.header)||examIn(group), source: selfMade?(/확인/.test((group||'')+s.title+q.header)?'lecture-check':'student-made'):'past-exam', group, appearances: app,
           flags:{ in_scope_this_year: /★/.test(q.header)?true:/✘|범위\s*밖/.test(q.header)?false:null, recalled:/복기/.test(q.header+(group||'')), uncertain:/불확실|추정/.test(q.header+(group||'')) } },
         ...q });
     }
   });
-  const images=collectImages(r.blocks, secOf);
+  let images=collectImages(r.blocks, secOf);
   // tag images that belong to questions
   const qImgs=new Map(bank.flatMap(q=>q.images.map(n=>[n,q.id]))); for(const im of images) if(qImgs.has(im.file)){ im.question_id=qImgs.get(im.file); im.signal='question'; }
   fs.writeFileSync(`${od}/문제은행.json`, JSON.stringify({source:f, document:fm, questions:bank},null,1));

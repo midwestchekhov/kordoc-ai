@@ -14,6 +14,8 @@ cd $HOME/mnt/test/jokbo-tool
 node jokbo.mjs "<족보 파일이나 폴더>" [더 많은 파일·폴더…] -o "<출력 폴더>"
 ```
 
+- 늘 전부 변환한다(필족 본문 포함). 읽을 때 고른다: 아래 "결과로 공부할 때".
+
 - HWP 도 HWPX 로 다시 저장할 필요 없이 그대로 넣는다.
 - 출력 폴더를 안 주면 첫 입력 옆 `변환결과/`. 보통 과목 폴더 아래 `변환결과/` 로 둔다 (예: `../소흡/변환결과`).
 - 족보 하나에 10~30초. 결과 폴더 이름은 원본 파일 이름.
@@ -24,18 +26,22 @@ node jokbo.mjs "<족보 파일이나 폴더>" [더 많은 파일·폴더…] -o 
 
 | 파일 | 쓰임 |
 |---|---|
-| `본문.md` | 장(Ⅰ·Ⅱ…)별 본문. LLM 문맥으로 쓸 것 |
-| `급분바.md` | 요약(급분바·끕분바·앞분바) |
+| `구성.json` | 장마다 갈래·판정 근거·길이, `read_order`(먼저 읽을 파일)·`fallback`(급분바가 안 잡힘). 맨 먼저 본다 |
+| `급분바.md` | 요약 장 전부(급분바·앞분바·끕분바·Summary 등). 공부의 기본 문맥 |
+| `문족.md` | 기출·연습 문제 장 읽기용 |
+| `본문.md` | 필족 본문. 필요할 때만 읽는다 |
+| `전체.md` | 문서 전체 한 파일 |
 | `머리말.md` | 표지·족원 말·출제 경향 표·학습목표 |
 | `문제은행.json` | 문항: header·stem·choices·answer·explanation·type(mcq·ox·short·recall)·images, meta(subject·lecture·professor·professor_source·year·exam·source·group·appearances·flags·cluster_id·times_seen), 빈 analysis, 파일 끝 recurrence(해마다 반복된 묶음) |
 | `강조.json` | 강조 조각: level 3 王 / 2 빨강·형광펜 / 1 굵게 / 0 곁말(회색) |
 | `그림목록.json` | 그림마다 장·주변 글·signal(emphasized·passed·mixed·neutral·question) |
-| `images/` | 긴 변 1600px webp |
+| `images/` | 남긴 출력이 쓰는 그림만, 긴 변 1600px webp |
 
 마크다운 표기: 빨강 `<r>…</r>`, 형광펜 `==…==`, 회색 `<g>…</g>`, 곁말 문단 `> [곁말] …`, 王 은 그대로.
 
 ## 결과로 공부할 때
 
+- 읽는 차례: `구성.json` 의 `read_order` 를 따른다. 급분바가 잡혔으면 `급분바.md`·`문족.md` 로 시작하고, 거기 없는 내용을 묻거나 설명이 모자랄 때만 `본문.md` 에서 해당 장을 찾아 읽는다. `fallback: true` 면 급분바가 없으니 `본문.md` 를 정리 대신 쓴다.
 - 문제 풀이: `문제은행.json` 에서 발문·선지만 먼저 보여 주고, 사용자가 답한 뒤 정답·해설을 보여 준다. 그림이 있는 문항은 `images/` 의 그림을 함께 연다.
 - 자주 나온 것: `recurrence` 를 해 수(`years`) 많은 순으로. 같은 묶음 안에서 정답이 해마다 다르면 같은 증례로 묻는 지점만 바꾼 것이니, 묶음 단위로 "출제될 수 있는 조건"과 "정답을 가르는 조건"을 정리한다. 이때 `analysis` 칸을 채워도 된다(`filled_by` 에 누가 채웠는지).
 - 교수님별·연도별로 고를 때 `meta.professor_source` 가 `unstated` 면 족보에 교수님이 안 적힌 문항이다. 지어내지 말 것.

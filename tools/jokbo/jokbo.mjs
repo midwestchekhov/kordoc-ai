@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 // 족보 HWP·HWPX → 본문·급분바 마크다운 + 문제은행 JSON
 // 사용: node jokbo.mjs <족보 파일이나 폴더…> [-o 출력폴더]   (출력 기본: 첫 입력 옆 "변환결과")
+// 늘 전부 낸다(머리말·급분바·문족·본문). 무엇을 먼저 읽을지는 결과의 구성.json read_order
 import { spawnSync } from 'node:child_process'; import fs from 'node:fs'; import path from 'node:path'; import { fileURLToPath } from 'node:url'; import os from 'node:os';
 const here=path.dirname(fileURLToPath(import.meta.url)); const args=process.argv.slice(2);
+const fi=args.indexOf('--full'); if(fi>=0) args.splice(fi,1); // 예전 옵션: 이제 늘 전부
 const oi=args.indexOf('-o'); let out=null; if(oi>=0){ out=args[oi+1]; args.splice(oi,2); }
 if(!args.length){ console.error('사용: node jokbo.mjs <족보 파일이나 폴더…> [-o 출력폴더]'); process.exit(1); }
 const inputs=args.map(a=>path.resolve(a));
