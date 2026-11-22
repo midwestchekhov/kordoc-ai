@@ -1,0 +1,119 @@
+// 족보 HWPX/HWP → 머리말·본문·급분바 .md (+ 강조.json, images/*.webp)
+import { parse, blocksToMarkdown } from 'kordoc'; import JSZip from 'jszip'; import sharp from 'sharp';
+import fs from 'fs'; import path from 'path';
+const OUT=process.argv[2], INPUTS=process.argv.slice(3);
+const files=INPUTS.flatMap(d=>fs.statSync(d).isDirectory()?fs.readdirSync(d).filter(f=>/\.hwpx?$/i.test(f)).sort().map(f=>path.join(d,f)):[d]);
+
+// ---------- sections
+const ROMAN=/^(Ⅰ|Ⅱ|Ⅲ|Ⅳ|Ⅴ|Ⅵ|Ⅶ|Ⅷ|Ⅸ|Ⅹ|Ⅺ|Ⅻ|X{0,1}(?:IX|IV|V?I{0,3}))\.?$/;
+const cleanTitle=t=>t.split('\n')[0].replace(/\s+(\d{2})?(교수님|족원|족장|족|교)\)\s.*$/,'').trim();
+const hdr=b=>{ if(b.type!=='table'||b.table.rows!==1||b.table.cols!==2) return null; const [a,t]=b.table.cells[0].map(c=>(c.text||'').trim()); return a&&ROMAN.test(a)&&t?{num:a,title:cleanTitle(t)}:null; };
+const kindOf=t=>/분바/.test(t)?'summary':/문족/.test(t)?'exam':/(확인|자작|예상)\s*문제/.test(t)?'practice':'body';
+
+// ---------- box-table unwrapping
+const IMGRE=/!\[[^\]]*\]\([^)]+\)/g;
+const cellBlocks=c=> c.blocks?.length ? c.blocks : (c.text||'').split('\n').filter(s=>s.trim()).map(t=>({type:'paragraph',text:t}));
+const isImgCell=c=>{ const bs=cellBlocks(c); return bs.length>0 && bs.every(b=>b.type==='image' || (b.type==='paragraph' && !(b.text||'').replace(IMGRE,'').trim())); };
+const isBlank=c=>!(c.text||'').trim() && !(c.blocks||[]).some(b=>b.type==='image');
+const isTiny=c=>!(c.blocks||[]).some(b=>b.type==='image') && (c.text||'').trim().length<=3;
+function unwrap(blocks){ const out=[];
+  for(const b of blocks){ if(b.type!=='table'){ out.push(b); continue; }
+    const t=b.table, cells=t.cells.flat();
+    if(t.cols===1){ t.cells.forEach((row,ri)=>{ const c=row[0]; if(!c) return; const bs=cellBlocks(c);
+        if(ri===0&&t.rows>1&&bs.length===1&&bs[0].type==='paragraph'&&(bs[0].text||'').length<=80&&!/!\[/.test(bs[0].text||'')) out.push({...bs[0],type:'heading',level:4});
+        else out.push(...unwrap(bs)); }); continue; }
+    if(cells.some(isImgCell)&&cells.every(c=>isImgCell(c)||isTiny(c)||isBlank(c))){ for(const c of cells) if(isImgCell(c)) out.push(...cellBlocks(c)); continue; }
+    if(t.cols===2&&t.cells.every(r=>r.length===2&&(isImgCell(r[0])!==isImgCell(r[1])||r.every(isBlank)))){ for(const r of t.cells){ const [im,tx]=isImgCell(r[0])?r:[r[1],r[0]]; out.push(...cellBlocks(im),...unwrap(cellBlocks(tx))); } continue; }
+    out.push(b); }
+  return out; }
+
+// ---------- colours from HWPX XML
+const hex=c=>{ const m=/^#?([0-9a-f]{6})$/i.exec(c||''); if(!m) return null; const n=parseInt(m[1],16); return [n>>16,(n>>8)&255,n&255]; };
+const colorClass=c=>{ const v=hex(c); if(!v) return null; const [r,g,b]=v;
+  if(r>=150&&g<=110&&b<=110) return 'red';
+  if(Math.max(r,g,b)-Math.min(r,g,b)<=12 && r>=0x5A && r<=0xC8) return 'gray'; return null; };
+const unesc=s=>s.replace(/<[^>]+>/g,'').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"').replace(/&apos;/g,"'").replace(/&amp;/g,'&');
+async function readStyles(hwpxBytes){
+  const zip=await JSZip.loadAsync(hwpxBytes);
+  const header=await zip.file('Contents/header.xml').async('string');
+  const cp={}; for(const m of header.matchAll(/<hh:charPr\b([^>]*)>([\s\S]*?)<\/hh:charPr>/g)){ const id=/\bid="(\d+)"/.exec(m[1])[1]; cp[id]={color:colorClass(/textColor="([^"]+)"/.exec(m[1])?.[1]), bold:/<hh:bold\b/.test(m[2])}; }
+  const names=Object.keys(zip.files).filter(n=>/^Contents\/section\d+\.xml$/.test(n)).sort((a,b)=>+a.match(/\d+/)[0]-+b.match(/\d+/)[0]);
+  const paras=[]; let seq=0;
+  for(const n of names){ const x=await zip.file(n).async('string');
+    const pst=[], rst=[]; let mark=false;
+    for(const m of x.matchAll(/<hp:p\b[^>]*?(\/?)>|<\/hp:p>|<hp:run\b[^>]*charPrIDRef="(\d+)"[^>]*?(\/?)>|<\/hp:run>|<hp:markpenBegin\b[^>]*>|<hp:markpenEnd\b[^>]*>|<hp:t\b[^>]*?(?:\/>|>([\s\S]*?)<\/hp:t>)/g)){
+      const tok=m[0];
+      if(tok.startsWith('<hp:p ')||tok==='<hp:p>'){ if(!m[1]){ pst.push({i:seq++,runs:[]}); } }
+      else if(tok==='</hp:p>'){ const p=pst.pop(); if(p) paras.push(p); }
+      else if(tok.startsWith('<hp:run')){ if(!m[3]) rst.push(m[2]); }
+      else if(tok==='</hp:run>') rst.pop();
+      else if(tok.startsWith('<hp:markpenBegin')) mark=true;
+      else if(tok.startsWith('<hp:markpenEnd')) mark=false;
+      else if(tok.startsWith('<hp:t')){ const t=unesc(m[4]||''); if(!t||!pst.length) continue; const s=cp[rst.at(-1)]||{};
+        pst.at(-1).runs.push({t, color:s.color, bold:!!s.bold, hl:mark}); }
+    } }
+  paras.sort((a,b)=>a.i-b.i);
+  return paras.map(p=>{ const segs=[]; for(const r of p.runs){ const cls=r.hl?'hl':r.color||null; const last=segs.at(-1);
+      if(last&&last.cls===cls&&last.bold===r.bold) last.t+=r.t; else segs.push({t:r.t,cls,bold:r.bold}); }
+    const all=segs.map(s=>s.t).join(''), grayLen=segs.filter(s=>s.cls==='gray').reduce((a,s)=>a+s.t.trim().length,0);
+    return {text:all, segs, grayRatio: all.trim()? grayLen/all.replace(/\s/g,'').length : 0}; });
+}
+
+// ---------- apply marks onto kordoc blocks
+const OPEN={red:'',hl:'',gray:''}, CLOSE={red:'',hl:'',gray:''};
+function holders(blocks, top, acc=[]){ blocks.forEach((b,j)=>{ const t=top??j;
+  if(b.type==='table'){ for(const row of b.table.cells) for(const c of row){ if(c.blocks?.length) holders(c.blocks,t,acc); else acc.push({o:c,top:t}); } }
+  else if(b.spans?.length) for(const s of b.spans) acc.push({o:s,top:t,block:b});
+  else if(typeof b.text==='string') acc.push({o:b,top:t,block:b});
+  if(b.children) holders(b.children,t,acc); }); return acc; }
+const ASIDE_RE=/^\s*(\d{2})?\s*(족|족원|족장|족보)(\s*부연)?\s*\)/;
+function applyMarks(blocks, paras, secOf){
+  const H=holders(blocks); let hi=0, hoff=0, hit=0, miss=0; const emph=[];
+  const want=[]; for(const p of paras) for(const s of p.segs){ const t=s.t.trim(); if(t.length<2) continue; if(s.cls||s.bold) want.push({...s,t}); }
+  for(const s of want){ let found=false;
+    for(let h=hi; h<Math.min(H.length,hi+60); h++){ const o=H[h].o, txt=o.text||''; const at=txt.indexOf(s.t, h===hi?hoff:0); if(at<0) continue;
+      if(s.cls){ o.text=txt.slice(0,at)+OPEN[s.cls]+s.t+CLOSE[s.cls]+txt.slice(at+s.t.length); }
+      hi=h; hoff=at+s.t.length+(s.cls?2:0); found=true;
+      const sec=secOf[H[h].top]; const king=/王/.test(s.t);
+      const level=king?3:(s.cls==='red'||s.cls==='hl')?2:s.cls==='gray'?0:1;
+      emph.push({section:sec?`${sec.num}. ${sec.title}`:'머리말', kind:sec?.kind||'prelude', text:s.t.replace(/[-]/g,''), level, sources:[king&&'王',s.bold&&'bold',s.cls==='red'&&'red',s.cls==='hl'&&'highlight'].filter(Boolean), aside:s.cls==='gray'});
+      break; }
+    if(found) { if(s.cls) hit++; } else if(s.cls) miss++; }
+  // 王…王 in plain text
+  for(const h of H){ for(const m of (h.o.text||'').matchAll(/王([^王\n]{1,200})王/g)){ const sec=secOf[h.top]; emph.push({section:sec?`${sec.num}. ${sec.title}`:'머리말', kind:sec?.kind||'prelude', text:m[1].replace(/[-]/g,'').trim(), level:3, sources:['王'], aside:false}); } }
+  // whole-paragraph asides at top level → quote
+  const grayParas=new Set(paras.filter(p=>p.grayRatio>=0.6).map(p=>p.text.trim()));
+  for(const b of blocks) if(b.type==='paragraph'){ const plain=(b.spans?b.spans.map(s=>s.text).join(''):b.text||'').replace(/[-]/g,'').trim();
+    if(plain && (grayParas.has(plain) || ASIDE_RE.test(plain))){ b.quote=true; const tgt=b.spans?.[0]||b; tgt.text='[곁말] '+(tgt.text||'').replace(/^/,'').replace(/$/,''); } }
+  return {hit,miss,emph};
+}
+const finishMd=md=>md.replace(//g,'<r>').replace(//g,'</r>').replace(//g,'==').replace(//g,'==').replace(//g,'<g>').replace(//g,'</g>')
+  .replace(/<r>(\s*)<\/r>|<g>(\s*)<\/g>|==(\s*)==/g,'$1$2$3');
+
+// ---------- main
+let rhwp=null; async function toHwpx(bytes){ if(!rhwp){ rhwp=await import(new URL('../node_modules/@rhwp/core/rhwp.js', import.meta.url)); await rhwp.default({module_or_path:fs.readFileSync(new URL('../node_modules/@rhwp/core/rhwp_bg.wasm', import.meta.url))}); } const d=new rhwp.HwpDocument(new Uint8Array(bytes)); const x=d.exportHwpx(); d.free?.(); return x; }
+const rep=[];
+for(const fp of files){
+  const t0=Date.now(); const buf=fs.readFileSync(fp); const isHwp=/\.hwp$/i.test(fp);
+  const r=await parse(buf,{});
+  const paras=await readStyles(isHwp? await toHwpx(buf) : buf);
+  const base=path.basename(fp).replace(/\.hwpx?$/i,''), od=path.join(OUT,base);
+  try{ fs.rmSync(path.join(od,'images'),{recursive:true,force:true}); }catch{} fs.mkdirSync(path.join(od,'images'),{recursive:true});
+  // images
+  const rename={}; let a=0,b=0;
+  for(const im of r.images||[]){ const nm=im.filename.replace(/\.[^.]+$/,'.webp'); let out;
+    try{ out=await sharp(im.data).resize({width:1600,height:1600,fit:'inside',withoutEnlargement:true}).webp({quality:85}).toBuffer(); }catch{ out=null; }
+    const name=out?nm:im.filename; fs.writeFileSync(path.join(od,'images',name), out||im.data); rename[im.filename]=name; a+=im.data.length; b+=(out||im.data).length; }
+  const fixImg=md=>md.replace(/image_\d+\.[a-z]+/g,m=>rename[m]||m);
+  // sections
+  const secOf=[]; const secs=[{num:'0',title:'머리말',kind:'prelude',blocks:[]}];
+  for(const blk of r.blocks){ const h=hdr(blk); if(h) secs.push({...h,kind:kindOf(h.title),blocks:[]}); else secs.at(-1).blocks.push(blk); secOf.push(h?null:secs.at(-1)); }
+  const {hit,miss,emph}=applyMarks(r.blocks, paras, secOf);
+  const md=kinds=>finishMd(fixImg(secs.filter(s=>kinds.includes(s.kind)).map(s=>(s.kind==='prelude'?'':`## ${s.num}. ${s.title}\n\n`)+blocksToMarkdown(unwrap(s.blocks))).join('\n\n')));
+  for(const [name,kinds] of [['머리말',['prelude']],['본문',['body']],['급분바',['summary']]]){ fs.writeFileSync(path.join(od,name+'.md'), md(kinds)); try{ fs.rmSync(path.join(od,name+'.원본표.md'),{force:true}); }catch{} }
+  fs.writeFileSync(path.join(od,'전체.md'), finishMd(fixImg(r.markdown)));
+  fs.writeFileSync(path.join(od,'강조.json'), JSON.stringify({source:path.basename(fp), legend:{3:'王',2:'빨강·형광펜',1:'굵게',0:'곁말(회색)'}, items:emph},null,1));
+  const lv=l=>emph.filter(e=>e.level===l).length;
+  rep.push({file:base.slice(0,24), colorHit:`${hit}/${hit+miss}`, 王:lv(3), red_hl:lv(2), bold:lv(1), aside:lv(0), asideParas:r.blocks.filter(x=>x.quote).length, imgMB:`${(a/1e6).toFixed(1)}→${(b/1e6).toFixed(1)}`, s:((Date.now()-t0)/1000).toFixed(0)});
+}
+console.table(rep);
