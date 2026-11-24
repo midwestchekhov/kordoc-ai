@@ -1,9 +1,10 @@
 import fs from 'fs'; import path from 'path';
-const OUT=process.argv[2]; const rep=[];
+// 사용: node lib/recurrence.mjs <출력폴더> [족보 결과 폴더 이름…]  (이름을 주면 그 족보만 다시 묶는다)
+const OUT=process.argv[2], ONLY=process.argv.slice(3).map(d=>d.normalize('NFC')); const rep=[];
 const norm=s=>(s||'').replace(/!\[[^\]]*\]\([^)]*\)/g,'').replace(/[①-⑤\s\d.,()\-:·/]/g,'').toLowerCase();
 const grams=s=>{const g=new Set(); for(let i=0;i<s.length-2;i++) g.add(s.slice(i,i+3)); return g;};
 const jac=(a,b)=>{let n=0; for(const x of a) if(b.has(x)) n++; return n/(a.size+b.size-n||1);};
-for(const d of fs.readdirSync(OUT)){ const p=path.join(OUT,d,'문제은행.json'); if(!fs.existsSync(p)) continue;
+for(const d of (ONLY.length?ONLY:fs.readdirSync(OUT))){ const p=path.join(OUT,d,'문제은행.json'); if(!fs.existsSync(p)) continue;
   const j=JSON.parse(fs.readFileSync(p)); const Q=j.questions; const G=Q.map(q=>grams(norm(q.stem+' '+q.choices.join(' '))));
   const parent=Q.map((_,i)=>i); const f=i=>parent[i]===i?i:(parent[i]=f(parent[i]));
   for(let a=0;a<Q.length;a++) for(let b=a+1;b<Q.length;b++){ const s=jac(G[a],G[b]); if(s>=0.45) parent[f(b)]=f(a); }
@@ -18,4 +19,4 @@ for(const d of fs.readdirSync(OUT)){ const p=path.join(OUT,d,'문제은행.json'
   fs.writeFileSync(p, JSON.stringify(j,null,1));
   rep.push({file:d.slice(0,30), q:Q.length, clusters:clusters.length, inClusters:clusters.reduce((a,c)=>a+c.size,0), seen3plus:Q.filter(q=>q.meta.times_seen>=3).length, top: clusters[0]? `${clusters[0].years.join(',')} :: ${clusters[0].sample.slice(0,40)}`:''});
 }
-console.table(rep);
+if(rep.length) console.table(rep);

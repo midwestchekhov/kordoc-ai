@@ -1,23 +1,12 @@
 import { parse } from 'kordoc'; import fs from 'fs'; import path from 'path';
-const dir=process.env.DIR, OUT=process.argv[2];
-const SUBJECT_BY_FOLDER={'소흡':'소화와 흡수'};
+// 사용: node lib/questions.mjs <출력폴더> <족보 파일…>
+const OUT=process.argv[2], FILES=process.argv.slice(3);
 import { splitSections, hdr } from './sections.mjs';
+import { fileMeta, qid, yr, profIn } from './meta.mjs';
 const N=t=>(t||'').replace(/[➀-➄]/g,c=>String.fromCharCode(0x2460+c.charCodeAt(0)-0x2780));
 const IMG=/!\[[^\]]*\]\(([^)]+)\)/g, imgsIn=s=>[...(s||'').matchAll(IMG)].map(m=>m[1]), noImg=s=>(s||'').replace(IMG,'').replace(/\n{2,}/g,'\n').trim();
-const yr=s=>{ const m=/(20\d\d)\s*년/.exec(s||'')||/(?:^|\D)(\d\d)년/.exec(s||''); return m? (m[1].length===2? 2000+ +m[1] : +m[1]) : null; };
-const profIn=s=>{ const m=/([가-힣]{2,4})\s*교수님/.exec(s||''); return m && !/모름/.test(s)? m[1] : null; };
 const examIn=s=>(/(1차|2차|중간평가|분기말평가|재시험|기말|본1|본2|CDP\d{4})/g.exec(s||'')||[])[0]||null;
 
-// ---- metadata from file
-function fileMeta(f, blocks){
-  const folder=path.basename(path.dirname(path.dirname(fs.realpathSync(path.join(dir,f)))));
-  const m=/^(\d{8})_([\d,]+)교시_(.+?)_\s*([가-힣]{2,4})\s*교수님_([가-힣]{2,4})/.exec(f);
-  const meta={ subject: SUBJECT_BY_FOLDER[folder]||folder, lecture: m?.[3].trim(), professor: m?.[4], date: m? `${m[1].slice(0,4)}-${m[1].slice(4,6)}-${m[1].slice(6,8)}`:null, period: m?.[2], author: m?.[5] };
-  for(const b of blocks.slice(0,5)) if(b.type==='table'){ const t=b.table.cells.flat().map(c=>c.text).join('\n'); const s=/<([^>]+)>\s*([가-힣]{2,4})\s*교수님/.exec(t);
-    if(s){ meta.subject=s[1].trim(); meta.professor=s[2]; const l=b.table.cells[1]?.[0]?.text.split('\n')[0].trim(); if(l) meta.lecture=l; break; } }
-  for(const b of blocks.slice(0,40)) if(b.type==='table'){ const t=b.table.cells.flat().map(c=>c.text).join(' '); const y=/처음\s*들어오신\s*연도\s*(20\d\d)/.exec(t); if(y){ meta.first_year=+y[1]; break; } }
-  return meta;
-}
 function question(row){
   const L={...row[0],text:N(row[0].text)}, R={...row[1],text:N(row[1].text)}; if(!/정답/.test(R.text)) return null;
   let answer=null, expl;
@@ -51,10 +40,11 @@ function collectImages(blocks, secOf){
   });
   return out;
 }
-const files=fs.readdirSync(dir).filter(f=>/\.hwpx?$/.test(f)).sort(); const summary=[];
-for(const f of files){
-  const r=await parse(fs.readFileSync(path.join(dir,f)),{imageFormat:'webp'});
-  const fm=fileMeta(f,r.blocks); const base=f.replace(/\.hwpx?$/,''), od=path.join(OUT,base);
+const summary=[];
+for(const fp of FILES){
+  const f=path.basename(fp).normalize('NFC');
+  const r=await parse(fs.readFileSync(fp),{imageFormat:'webp'});
+  const fm=fileMeta(fp,r.blocks); const base=f.replace(/\.hwpx?$/i,''), od=path.join(OUT,base); fs.mkdirSync(od,{recursive:true});
   const { secs, secOf, hasSummary } = splitSections(r.blocks);
   const bank=[]; let group=null, gProf=null, gYear=null, lastProf=null, curSec=null;
   r.blocks.forEach((b,j)=>{ const s=secOf[j]; if(!s) return; if(s!==curSec){ curSec=s; group=null; gProf=null; gYear=null; lastProf=null; }
@@ -68,8 +58,8 @@ for(const f of files){
       let profSrc='group', prof=gProf; if(!prof && lastProf){ prof=lastProf; profSrc='carried'; } if(!prof && (selfMade || gYear===2026)){ prof=fm.professor; profSrc='file'; }
       const qy=appearances(q.header)?.[0].year ?? yr(q.header) ?? gYear; if(!prof && fm.first_year && qy && qy>=fm.first_year){ prof=fm.professor; profSrc='first-year-rule'; } if(!prof){ prof=null; profSrc= /모름/.test(group||'')?'unknown':'unstated'; }
       const app=appearances(q.header);
-      bank.push({ id:`${base.slice(0,8)}-${fm.period}-${String(bank.length+1).padStart(3,'0')}`, section:{num:s.num, title:s.title, kind:s.kind},
-        meta:{ subject:fm.subject, lecture:fm.lecture, professor:prof, professor_source:profSrc, year: app?.[0].year ?? yr(q.header) ?? gYear ?? (selfMade?+fm.date.slice(0,4):null), exam: examIn(q.header)||examIn(group), source: selfMade?(/확인/.test((group||'')+s.title+q.header)?'lecture-check':'student-made'):'past-exam', group, appearances: app,
+      bank.push({ id:qid(fm,base,bank.length+1), section:{num:s.num, title:s.title, kind:s.kind},
+        meta:{ subject:fm.subject, lecture:fm.lecture, professor:prof, professor_source:profSrc, year: app?.[0].year ?? yr(q.header) ?? gYear ?? (selfMade?(fm.date?+fm.date.slice(0,4):null):null), exam: examIn(q.header)||examIn(group), source: selfMade?(/확인/.test((group||'')+s.title+q.header)?'lecture-check':'student-made'):'past-exam', group, appearances: app,
           flags:{ in_scope_this_year: /★/.test(q.header)?true:/✘|범위\s*밖/.test(q.header)?false:null, recalled:/복기/.test(q.header+(group||'')), uncertain:/불확실|추정/.test(q.header+(group||'')) } },
         ...q });
     }
@@ -82,4 +72,4 @@ for(const f of files){
   const c=(a,k,v)=>a.filter(x=>x[k]===v).length;
   summary.push({lecture:fm.lecture, prof:fm.professor, q:bank.length, withYear:bank.filter(q=>q.meta.year).length, withProf:bank.filter(q=>q.meta.professor).length, profCarried:bank.filter(q=>q.meta.professor_source==='carried').length, dupLinked:bank.filter(q=>q.meta.appearances).length, imgs:images.length, emph:c(images,'signal','emphasized'), passed:c(images,'signal','passed'), mixed:c(images,'signal','mixed'), neutral:c(images,'signal','neutral'), inQ:c(images,'signal','question')});
 }
-console.table(summary); fs.writeFileSync(OUT+'/report-meta.json',JSON.stringify(summary,null,1));
+if(summary.length) console.table(summary);
