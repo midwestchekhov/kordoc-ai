@@ -1,14 +1,16 @@
-// 족보 HWPX/HWP → 머리말·본문·급분바 .md (+ 강조.json, images/*.webp)
+// 족보 HWPX/HWP → 구성.json·머리말·급분바·문족·본문·전체 .md (+ 강조.json, images/*.webp). 파싱은 늘 전부, 무엇을 먼저 읽을지는 구성.json read_order
 import { parse, blocksToMarkdown } from 'kordoc'; import JSZip from 'jszip'; import sharp from 'sharp';
 import fs from 'fs'; import path from 'path';
 const OUT=process.argv[2], INPUTS=process.argv.slice(3);
 const files=INPUTS.flatMap(d=>fs.statSync(d).isDirectory()?fs.readdirSync(d).filter(f=>/\.hwpx?$/i.test(f)).sort().map(f=>path.join(d,f)):[d]);
 
-// ---------- sections
-const ROMAN=/^(Ⅰ|Ⅱ|Ⅲ|Ⅳ|Ⅴ|Ⅵ|Ⅶ|Ⅷ|Ⅸ|Ⅹ|Ⅺ|Ⅻ|X{0,1}(?:IX|IV|V?I{0,3}))\.?$/;
-const cleanTitle=t=>t.split('\n')[0].replace(/\s+(\d{2})?(교수님|족원|족장|족|교)\)\s.*$/,'').trim();
-const hdr=b=>{ if(b.type!=='table'||b.table.rows!==1||b.table.cols!==2) return null; const [a,t]=b.table.cells[0].map(c=>(c.text||'').trim()); return a&&ROMAN.test(a)&&t?{num:a,title:cleanTitle(t)}:null; };
-const kindOf=t=>/분바/.test(t)?'summary':/문족/.test(t)?'exam':/(확인|자작|예상)\s*문제/.test(t)?'practice':'body';
+// ---------- sections (lib/sections.mjs)
+import { splitSections, KIND_KO, isQuestionRow, hdr } from './sections.mjs';
+import { tidyEmph } from './emphasis.mjs';
+import { tableList, emphSummary } from './extras.mjs';
+import { isBmp, decodeBmp } from './bmp.mjs';
+// sharp 는 BMP 를 못 읽어서 직접 풀어 넘긴다 (풀지 못하면 sharp 에 그대로: 실패하면 원본을 남긴다)
+const toSharp=d=>{ const x=isBmp(d)&&decodeBmp(d); return x? sharp(x.data,{raw:{width:x.width,height:x.height,channels:x.channels}}) : sharp(d); };
 
 // ---------- box-table unwrapping
 const IMGRE=/!\[[^\]]*\]\([^)]+\)/g;
@@ -66,6 +68,9 @@ function holders(blocks, top, acc=[]){ blocks.forEach((b,j)=>{ const t=top??j;
   else if(b.spans?.length) for(const s of b.spans) acc.push({o:s,top:t,block:b});
   else if(typeof b.text==='string') acc.push({o:b,top:t,block:b});
   if(b.children) holders(b.children,t,acc); }); return acc; }
+const clean=t=>(t||'').replace(/[\uE000-\uF8FF]/g,'').replace(/\s+/g,' ').trim();
+// 王 을 빼면 남는 게 번호·기호뿐인 조각 ("王王王", "Q1. 王")
+const thin=t=>(t.replace(/王/g,'').replace(/^\s*[\dA-Za-z]{0,3}[.)]\s*/,'').match(/[가-힣A-Za-z]/g)||[]).length<2;
 const ASIDE_RE=/^\s*(\d{2})?\s*(족|족원|족장|족보)(\s*부연)?\s*\)/;
 function applyMarks(blocks, paras, secOf){
   const H=holders(blocks); let hi=0, hoff=0, hit=0, miss=0; const emph=[];
@@ -76,17 +81,21 @@ function applyMarks(blocks, paras, secOf){
       hi=h; hoff=at+s.t.length+(s.cls?2:0); found=true;
       const sec=secOf[H[h].top]; const king=/王/.test(s.t);
       const level=king?3:(s.cls==='red'||s.cls==='hl')?2:s.cls==='gray'?0:1;
-      emph.push({section:sec?`${sec.num}. ${sec.title}`:'머리말', kind:sec?.kind||'prelude', text:s.t.replace(/[-]/g,''), level, sources:[king&&'王',s.bold&&'bold',s.cls==='red'&&'red',s.cls==='hl'&&'highlight'].filter(Boolean), aside:s.cls==='gray'});
+      let text=clean(s.t), scope='fragment';
+      // 王만 있는 조각("王王王")은 그 문단(칸) 글 전체를 강조 내용으로
+      if(king && thin(text)){ text=clean(H[h].o.text).replace(/王/g,'').trim().slice(0,400); scope='paragraph'; }
+      emph.push({section:sec?`${sec.num}. ${sec.title}`:'머리말', kind:sec?.kind||'prelude', text, level, scope, top:H[h].top, sources:[king&&'王',s.bold&&'bold',s.cls==='red'&&'red',s.cls==='hl'&&'highlight'].filter(Boolean), aside:s.cls==='gray'});
       break; }
     if(found) { if(s.cls) hit++; } else if(s.cls) miss++; }
   // 王…王 in plain text
-  for(const h of H){ for(const m of (h.o.text||'').matchAll(/王([^王\n]{1,200})王/g)){ const sec=secOf[h.top]; emph.push({section:sec?`${sec.num}. ${sec.title}`:'머리말', kind:sec?.kind||'prelude', text:m[1].replace(/[-]/g,'').trim(), level:3, sources:['王'], aside:false}); } }
+  for(const h of H){ for(const m of (h.o.text||'').matchAll(/王([^王\n]{1,200})王/g)){ const sec=secOf[h.top]; const t=clean(m[1]); if(t.length>=2) emph.push({section:sec?`${sec.num}. ${sec.title}`:'머리말', kind:sec?.kind||'prelude', text:t, level:3, scope:'fragment', top:h.top, sources:['王'], aside:false}); } }
   // whole-paragraph asides at top level → quote
   const grayParas=new Set(paras.filter(p=>p.grayRatio>=0.6).map(p=>p.text.trim()));
   for(const b of blocks) if(b.type==='paragraph'){ const plain=(b.spans?b.spans.map(s=>s.text).join(''):b.text||'').replace(/[-]/g,'').trim();
     if(plain && (grayParas.has(plain) || ASIDE_RE.test(plain))){ b.quote=true; const tgt=b.spans?.[0]||b; tgt.text='[곁말] '+(tgt.text||'').replace(/^/,'').replace(/$/,''); } }
-  return {hit,miss,emph};
+  return {hit,miss,emph:tidyEmph(emph)};
 }
+
 const finishMd=md=>md.replace(//g,'<r>').replace(//g,'</r>').replace(//g,'==').replace(//g,'==').replace(//g,'<g>').replace(//g,'</g>')
   .replace(/<r>(\s*)<\/r>|<g>(\s*)<\/g>|==(\s*)==/g,'$1$2$3');
 
@@ -96,24 +105,41 @@ const rep=[];
 for(const fp of files){
   const t0=Date.now(); const buf=fs.readFileSync(fp); const isHwp=/\.hwp$/i.test(fp);
   const r=await parse(buf,{});
+  if(!r?.blocks) throw new Error(`kordoc 이 읽지 못함: ${r?.error||r?.code||'까닭 모름'}${/unzip|압축|size|크기|limit|한도/i.test(String(r?.error))?' (압축 해제 한도: KORDOC_MAX_UNZIP_MB 를 더 크게)':''}`);
   const paras=await readStyles(isHwp? await toHwpx(buf) : buf);
-  const base=path.basename(fp).replace(/\.hwpx?$/i,''), od=path.join(OUT,base);
-  try{ fs.rmSync(path.join(od,'images'),{recursive:true,force:true}); }catch{} fs.mkdirSync(path.join(od,'images'),{recursive:true});
-  // images
-  const rename={}; let a=0,b=0;
-  for(const im of r.images||[]){ const nm=im.filename.replace(/\.[^.]+$/,'.webp'); let out;
-    try{ out=await sharp(im.data).resize({width:1600,height:1600,fit:'inside',withoutEnlargement:true}).webp({quality:85}).toBuffer(); }catch{ out=null; }
-    const name=out?nm:im.filename; fs.writeFileSync(path.join(od,'images',name), out||im.data); rename[im.filename]=name; a+=im.data.length; b+=(out||im.data).length; }
-  const fixImg=md=>md.replace(/image_\d+\.[a-z]+/g,m=>rename[m]||m);
+  const base=path.basename(fp).normalize('NFC').replace(/\.hwpx?$/i,''), od=path.join(OUT,base);
   // sections
-  const secOf=[]; const secs=[{num:'0',title:'머리말',kind:'prelude',blocks:[]}];
-  for(const blk of r.blocks){ const h=hdr(blk); if(h) secs.push({...h,kind:kindOf(h.title),blocks:[]}); else secs.at(-1).blocks.push(blk); secOf.push(h?null:secs.at(-1)); }
+  const { secs, secOf, headerStyle, hasSummary } = splitSections(r.blocks);
   const {hit,miss,emph}=applyMarks(r.blocks, paras, secOf);
-  const md=kinds=>finishMd(fixImg(secs.filter(s=>kinds.includes(s.kind)).map(s=>(s.kind==='prelude'?'':`## ${s.num}. ${s.title}\n\n`)+blocksToMarkdown(unwrap(s.blocks))).join('\n\n')));
-  for(const [name,kinds] of [['머리말',['prelude']],['본문',['body']],['급분바',['summary']]]){ fs.writeFileSync(path.join(od,name+'.md'), md(kinds)); try{ fs.rmSync(path.join(od,name+'.원본표.md'),{force:true}); }catch{} }
+  const OUTS=[['머리말',['prelude']],['급분바',['summary']],['문족',['exam','practice']],['본문',['body']]];
+  const keepKinds=new Set(OUTS.flatMap(o=>o[1]));
+  const raw={}; for(const [name,kinds] of OUTS) raw[name]=secs.filter(s=>kinds.includes(s.kind)).map(s=>(s.kind==='prelude'?'':`## ${s.num}. ${s.title}\n\n`)+blocksToMarkdown(unwrap(s.blocks))).join('\n\n');
+  // md 가 쓰는 그림만 (안 쓰는 그림은 버린다)
+  const used=new Set(); const addRefs=t=>{ for(const m of (t||'').matchAll(/image_\d+\.[a-z]+/g)) used.add(m[0]); };
+  Object.values(raw).forEach(addRefs); addRefs(r.markdown);
+  // images
+  try{ fs.rmSync(path.join(od,'images'),{recursive:true,force:true}); }catch{} fs.mkdirSync(path.join(od,'images'),{recursive:true});
+  const rename={}; let a=0,b=0,kept=0;
+  for(const im of r.images||[]){ a+=im.data.length; if(!used.has(im.filename)) continue; kept++; const nm=im.filename.replace(/\.[^.]+$/,'.webp'); let out;
+    try{ out=await toSharp(im.data).resize({width:1600,height:1600,fit:'inside',withoutEnlargement:true}).webp({quality:85}).toBuffer(); }catch{ out=null; }
+    const name=out?nm:im.filename; fs.writeFileSync(path.join(od,'images',name), out||im.data); rename[im.filename]=name; b+=(out||im.data).length; }
+  const fixImg=md=>md.replace(/image_\d+\.[a-z]+/g,m=>rename[m]||m.replace(/\.[a-z]+$/,'.webp'));
+  for(const [name] of OUTS){ fs.writeFileSync(path.join(od,name+'.md'), finishMd(fixImg(raw[name]))); try{ fs.rmSync(path.join(od,name+'.원본표.md'),{force:true}); }catch{} }
   fs.writeFileSync(path.join(od,'전체.md'), finishMd(fixImg(r.markdown)));
-  fs.writeFileSync(path.join(od,'강조.json'), JSON.stringify({source:path.basename(fp), legend:{3:'王',2:'빨강·형광펜',1:'굵게',0:'곁말(회색)'}, items:emph},null,1));
-  const lv=l=>emph.filter(e=>e.level===l).length;
-  rep.push({file:base.slice(0,24), colorHit:`${hit}/${hit+miss}`, 王:lv(3), red_hl:lv(2), bold:lv(1), aside:lv(0), asideParas:r.blocks.filter(x=>x.quote).length, imgMB:`${(a/1e6).toFixed(1)}→${(b/1e6).toFixed(1)}`, s:((Date.now()-t0)/1000).toFixed(0)});
+  // 표 목록(병합 칸을 푼 Markdown 표)·강조요약(강조가 걸린 문단·표 전체와 그림)
+  const fmt=t=>finishMd(fixImg(t)); const render=bs=>finishMd(fixImg(blocksToMarkdown(unwrap(bs)))).trim();
+  const em=emph.filter(e=>keepKinds.has(e.kind));
+  const tables=tableList({blocks:r.blocks, secOf, emph:em, unwrap, fmt});
+  fs.writeFileSync(path.join(od,'표목록.json'), JSON.stringify({source:path.basename(fp).normalize('NFC'), tables:tables.map(({markdown,...t})=>t)},null,1));
+  fs.writeFileSync(path.join(od,'표.md'), tables.map(t=>`### ${t.id} · ${t.section} · 강조 ${t.emphasis}${t.merged?' · 병합 풂':''}\n\n${t.markdown}`).join('\n\n')+'\n');
+  fs.writeFileSync(path.join(od,'강조요약.json'), JSON.stringify({source:path.basename(fp).normalize('NFC'), note:'level 3 王 / 2 빨강·형광펜. context 는 강조가 걸린 문단·표 전체(제목꼴이면 그 아래 몇 블록까지). negative 는 "시험에 안 나옴" 같은 말', items:emphSummary({blocks:r.blocks, secOf, emph:em, unwrap, render, fmt})},null,1));
+  const imgsOf=s=>{ const set=new Set(); for(const blk of s.blocks) for(const m of JSON.stringify(blk.table?blk.table.cells.map(r=>r.map(c=>c.text)):blk.text||'').matchAll(/image_\d+\.[a-z]+/g)) set.add(m[0]); for(const blk of s.blocks) if(blk.type==='image') set.add('?'); return set.size; };
+  fs.writeFileSync(path.join(od,'구성.json'), JSON.stringify({source:path.basename(fp).normalize('NFC'), header_style:headerStyle, has_summary:hasSummary,
+    // 먼저 읽을 것: 급분바가 잡히면 급분바·문족, 안 잡히면(fallback) 본문·문족. 본문은 필요할 때만
+    read_order: hasSummary? ['급분바.md','문족.md','본문.md'] : ['본문.md','문족.md'], fallback: !hasSummary,
+    sections:secs.map(s=>({num:s.num, title:s.title, kind:s.kind, kind_ko:KIND_KO[s.kind], decided_by:s.reason, chars:blocksToMarkdown(s.blocks).length, question_rows:s.questionRows, images:imgsOf(s), output: OUTS.find(o=>o[1].includes(s.kind))?.[0]??null}))},null,1));
+  fs.writeFileSync(path.join(od,'강조.json'), JSON.stringify({source:path.basename(fp), legend:{3:'王',2:'빨강·형광펜',1:'굵게',0:'곁말(회색)'}, items:emph.filter(e=>keepKinds.has(e.kind)).map(({top,...e})=>e)},null,1));
+  const lv=l=>emph.filter(e=>e.level===l&&keepKinds.has(e.kind)).length;
+  rep.push({file:base.slice(0,24), kinds:secs.slice(1).map(s=>s.kind[0]+(s.reason==='content'?'*':'')).join(''), summary:hasSummary, colorHit:`${hit}/${hit+miss}`, 王:lv(3), red_hl:lv(2), imgs:`${kept}/${(r.images||[]).length}`, imgMB:`${(a/1e6).toFixed(1)}→${(b/1e6).toFixed(1)}`, s:((Date.now()-t0)/1000).toFixed(0)});
 }
 console.table(rep);
