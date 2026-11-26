@@ -42,12 +42,25 @@ export function classifyTitle(t) {
   return { kind: 'body', reason: 'title' };
 }
 
-// 문항 줄: 2칸 표의 한 줄, 오른칸에 "정답"
-export const isQuestionRow = row => row.length === 2 && /정답/.test(row[1]?.text || '');
+// 문항 줄: 2칸 표의 한 줄, 오른칸이 "정답" 으로 시작하고 그 뒤에 답이 있다 (급분바 표의 "정답률"·"정답을 가르는 조건" 같은 칸은 아님)
+export const isQuestionRow = row => row.length === 2 && (row[0]?.text || '').trim().length >= 2 && /^\s*정답\s*([\/:|\n]|\s)\s*\S/.test(row[1]?.text || '');
 export function questionRows(blocks) {
   let q = 0, tables = 0;
   for (const b of blocks) if (b.type === 'table' && !hdr(b)) { tables++; if (b.table.cols === 2) q += b.table.cells.filter(isQuestionRow).length; }
   return { q, tables };
+}
+
+const qRowsOf = b => b.type === 'table' && b.table.cols === 2 && !hdr(b) ? b.table.cells.filter(isQuestionRow).length : 0;
+const GROUP_HEAD = /문족|기출|족보\s*문제|\d{2,4}\s*년|^\s*[A-Z]\.\s|평가|교수님|Part\s*\d/i;
+// 장 안에서 문족이 시작하는 블록 번호 (없으면 -1): 첫 문항 표부터 끝까지 문항 표가 2줄 이상이고 다른 표보다 많을 때.
+// 첫 문항 표 바로 앞의 짧은 묶음 제목 문단("2025년 문족", "A. …")도 같이 가져간다
+export function nestedExamStart(bs) {
+  const qi = bs.findIndex(b => qRowsOf(b) > 0); if (qi < 0) return -1;
+  let q = 0, other = 0; for (const b of bs.slice(qi)) if (b.type === 'table' && !hdr(b)) { const n = qRowsOf(b); if (n) q += n; else other++; }
+  if (q < 2 || q < other) return -1;
+  let at = qi; for (let j = qi - 1; j >= 0 && j >= qi - 3; j--) { const b = bs[j]; const t = (b.text || '').trim();
+    if ((b.type === 'paragraph' || b.type === 'heading') && t.length <= 80 && GROUP_HEAD.test(t)) at = j; else if (b.type === 'paragraph' && !t) continue; else break; }
+  return at;
 }
 
 // 블록을 장으로 나눈다. secOf[i] = blocks[i] 가 속한 장 (장 제목 블록은 null)
@@ -61,6 +74,13 @@ export function splitSections(blocks) {
     if (h) { secs.push({ ...h, ...classifyTitle(h.title), blocks: [] }); secOf.push(null); }
     else { secs.at(-1).blocks.push(b); secOf.push(secs.at(-1)); }
   }
+  // 요약·본문 장 안에 문족이 통째로 들어 있으면(장 뒷부분이 문항 표 위주) 그 부분을 따로 기출 장으로 뗀다
+  for (let k = secs.length - 1; k >= 1; k--) { const s = secs[k]; if (s.kind !== 'summary' && s.kind !== 'body') continue;
+    const at = nestedExamStart(s.blocks); if (at < 0) continue;
+    // 앞에 내용이 없으면 장 전체가 문항: 떼지 않고 장째 기출로
+    if (!s.blocks.slice(0, at).some(b => b.type !== 'paragraph' || (b.text || '').trim().length > 3)) { s.kind = 'exam'; s.reason = 'content'; continue; }
+    const sub = { num: s.num + '-문족', title: s.title + ' 안의 문족', kind: 'exam', reason: 'nested', blocks: s.blocks.slice(at) };
+    s.blocks = s.blocks.slice(0, at); secs.splice(k + 1, 0, sub); for (const b of sub.blocks) secOf[blocks.indexOf(b)] = sub; }
   // 내용으로 고치기: 제목으로 본문인데 문항 표가 대부분이면 기출
   for (const s of secs) {
     const { q, tables } = questionRows(s.blocks); s.questionRows = q;

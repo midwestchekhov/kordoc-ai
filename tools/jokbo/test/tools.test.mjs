@@ -63,3 +63,14 @@ test('강조요약: 王 제목은 그 아래 블록까지, 겹치는 항목은 �
   const items = emphSummary({ blocks, secOf: [sec, sec, sec], emph, unwrap: x => x, render, fmt: x => x });
   assert.equal(items.length, 1); assert.equal(items[0].scope, 'heading+following'); assert.deepEqual(items[0].emphasized, ['표 전체', 'Short']);
 });
+
+import { decodeBmp } from '../lib/bmp.mjs';
+test('BMP 풀기: 24비트 아래에서 위로', () => {
+  const w = 2, h = 2, stride = 8, off = 54, b = Buffer.alloc(off + stride * h);
+  b.write('BM', 0); b.writeUInt32LE(b.length, 2); b.writeUInt32LE(off, 10); b.writeUInt32LE(40, 14); b.writeInt32LE(w, 18); b.writeInt32LE(h, 22); b.writeUInt16LE(1, 26); b.writeUInt16LE(24, 28);
+  // 파일의 첫 줄 = 그림의 아랫줄: 파랑, 초록 / 둘째 줄 = 윗줄: 빨강, 흰색 (BGR)
+  Buffer.from([255, 0, 0, 0, 255, 0]).copy(b, off); Buffer.from([0, 0, 255, 255, 255, 255]).copy(b, off + stride);
+  const x = decodeBmp(b);
+  assert.deepEqual([x.width, x.height], [2, 2]);
+  assert.deepEqual([...x.data], [255, 0, 0, 255, 255, 255, 0, 0, 255, 0, 255, 0]);
+});

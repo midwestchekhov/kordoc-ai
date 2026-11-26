@@ -35,6 +35,8 @@ const files = [...new Set(inputs.flatMap(p => fs.statSync(p).isDirectory() ? fs.
 const out = path.resolve(opt.out || path.join(path.dirname(inputs[0] || '.'), '변환결과')); fs.mkdirSync(out, { recursive: true });
 
 // ---- 상태
+// 그림이 압축 안 된 BMP 인 족보는 풀면 256MB(kordoc 기본 한도)를 넘는다. 이미 정해 둔 값이 있으면 그대로
+process.env.KORDOC_MAX_UNZIP_MB ??= '512';
 const T0 = Date.now(), left = () => opt.budget ? opt.budget * 1000 - (Date.now() - T0) : Infinity;
 const baseOf = fp => path.basename(fp).normalize('NFC').replace(/\.hwpx?$/i, '');
 const stateFile = fp => path.join(out, baseOf(fp), '상태.json');

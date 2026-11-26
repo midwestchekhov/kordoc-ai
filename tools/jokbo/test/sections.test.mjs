@@ -43,3 +43,16 @@ test('표 제목이 없으면 문단 "Ⅰ. 제목" 으로 나눈다', () => {
   assert.equal(r.headerStyle, 'paragraph');
   assert.equal(r.secs.map(s => s.kind).join(' '), 'prelude body summary exam');
 });
+
+test('급분바 장 안에 든 문족은 따로 떼어 기출로', () => {
+  const r = splitSections([H('Ⅰ', '식도'), P('.'), H('Ⅱ', '급분바'), P('요약 글'), { type: 'table', table: { rows: 1, cols: 3, cells: [[{ text: 'a' }, { text: 'b' }, { text: 'c' }]] } }, P('2025년 문족'), Q(3), P('해설 덧붙임'), Q(2)]);
+  assert.deepEqual(r.secs.map(s => [s.title, s.kind]), [['머리말', 'prelude'], ['식도', 'body'], ['급분바', 'summary'], ['급분바 안의 문족', 'exam']]);
+  assert.equal(r.secs[3].blocks[0].text, '2025년 문족'); assert.equal(r.secs[2].blocks.length, 2);
+  assert.equal(r.secOf.at(-1), r.secs[3]);
+});
+
+test('급분바 표의 "정답" 낱말은 문항이 아니다', () => {
+  const T = rows => ({ type: 'table', table: { rows: rows.length, cols: 2, cells: rows.map(([a, b]) => [{ text: a }, { text: b }]) } });
+  const r = splitSections([H('Ⅰ', '급분바'), T([['PPI', '정답률 높은 약'], ['감별', '이 둘에서 정답이 갈린다']]), H('Ⅱ', '문족'), Q(2)]);
+  assert.equal(r.secs[1].kind, 'summary'); assert.equal(r.secs[1].questionRows, 0); assert.equal(r.secs[2].questionRows, 2);
+});

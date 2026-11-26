@@ -1,7 +1,7 @@
 import { parse } from 'kordoc'; import fs from 'fs'; import path from 'path';
 // 사용: node lib/questions.mjs <출력폴더> <족보 파일…>
 const OUT=process.argv[2], FILES=process.argv.slice(3);
-import { splitSections, hdr } from './sections.mjs';
+import { splitSections, hdr, isQuestionRow } from './sections.mjs';
 import { fileMeta, qid, yr, profIn } from './meta.mjs';
 const N=t=>(t||'').replace(/[➀-➄]/g,c=>String.fromCharCode(0x2460+c.charCodeAt(0)-0x2780));
 const IMG=/!\[[^\]]*\]\(([^)]+)\)/g, imgsIn=s=>[...(s||'').matchAll(IMG)].map(m=>m[1]), noImg=s=>(s||'').replace(IMG,'').replace(/\n{2,}/g,'\n').trim();
@@ -44,6 +44,7 @@ const summary=[];
 for(const fp of FILES){
   const f=path.basename(fp).normalize('NFC');
   const r=await parse(fs.readFileSync(fp),{imageFormat:'webp'});
+  if(!r?.blocks) throw new Error(`kordoc 이 읽지 못함: ${r?.error||r?.code||'까닭 모름'}${/unzip|압축|size|크기|limit|한도/i.test(String(r?.error))?' (압축 해제 한도: KORDOC_MAX_UNZIP_MB 를 더 크게)':''}`);
   const fm=fileMeta(fp,r.blocks); const base=f.replace(/\.hwpx?$/i,''), od=path.join(OUT,base); fs.mkdirSync(od,{recursive:true});
   const { secs, secOf, hasSummary } = splitSections(r.blocks);
   const bank=[]; let group=null, gProf=null, gYear=null, lastProf=null, curSec=null;
@@ -53,7 +54,7 @@ for(const fp of FILES){
     if(b.type==='paragraph' && b.text.length<80 && (/^[A-Z]\.\s?\S/.test(b.text) || /(20\d\d|\d\d)\s*년.*(문족|문제|평가)/.test(b.text) || /(자작|확인|예상)\s*문제/.test(b.text))){
       group=b.text.trim(); gYear=yr(group); const p=profIn(group); if(p){ gProf=p; lastProf=p; } else gProf=null; }
     if(b.type!=='table'||b.table.cols!==2||hdr(b)) return;
-    for(const row of b.table.cells){ const q=question(row); if(!q) continue;
+    for(const row of b.table.cells){ if(!isQuestionRow(row)) continue; const q=question(row); if(!q) continue;
       const selfMade=/자작|예상|확인\s*문제/.test((group||'')+s.title+q.header);
       let profSrc='group', prof=gProf; if(!prof && lastProf){ prof=lastProf; profSrc='carried'; } if(!prof && (selfMade || gYear===2026)){ prof=fm.professor; profSrc='file'; }
       const qy=appearances(q.header)?.[0].year ?? yr(q.header) ?? gYear; if(!prof && fm.first_year && qy && qy>=fm.first_year){ prof=fm.professor; profSrc='first-year-rule'; } if(!prof){ prof=null; profSrc= /모름/.test(group||'')?'unknown':'unstated'; }

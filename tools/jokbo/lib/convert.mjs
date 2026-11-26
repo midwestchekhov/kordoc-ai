@@ -8,6 +8,9 @@ const files=INPUTS.flatMap(d=>fs.statSync(d).isDirectory()?fs.readdirSync(d).fil
 import { splitSections, KIND_KO, isQuestionRow, hdr } from './sections.mjs';
 import { tidyEmph } from './emphasis.mjs';
 import { tableList, emphSummary } from './extras.mjs';
+import { isBmp, decodeBmp } from './bmp.mjs';
+// sharp 는 BMP 를 못 읽어서 직접 풀어 넘긴다 (풀지 못하면 sharp 에 그대로: 실패하면 원본을 남긴다)
+const toSharp=d=>{ const x=isBmp(d)&&decodeBmp(d); return x? sharp(x.data,{raw:{width:x.width,height:x.height,channels:x.channels}}) : sharp(d); };
 
 // ---------- box-table unwrapping
 const IMGRE=/!\[[^\]]*\]\([^)]+\)/g;
@@ -102,6 +105,7 @@ const rep=[];
 for(const fp of files){
   const t0=Date.now(); const buf=fs.readFileSync(fp); const isHwp=/\.hwp$/i.test(fp);
   const r=await parse(buf,{});
+  if(!r?.blocks) throw new Error(`kordoc 이 읽지 못함: ${r?.error||r?.code||'까닭 모름'}${/unzip|압축|size|크기|limit|한도/i.test(String(r?.error))?' (압축 해제 한도: KORDOC_MAX_UNZIP_MB 를 더 크게)':''}`);
   const paras=await readStyles(isHwp? await toHwpx(buf) : buf);
   const base=path.basename(fp).normalize('NFC').replace(/\.hwpx?$/i,''), od=path.join(OUT,base);
   // sections
@@ -117,7 +121,7 @@ for(const fp of files){
   try{ fs.rmSync(path.join(od,'images'),{recursive:true,force:true}); }catch{} fs.mkdirSync(path.join(od,'images'),{recursive:true});
   const rename={}; let a=0,b=0,kept=0;
   for(const im of r.images||[]){ a+=im.data.length; if(!used.has(im.filename)) continue; kept++; const nm=im.filename.replace(/\.[^.]+$/,'.webp'); let out;
-    try{ out=await sharp(im.data).resize({width:1600,height:1600,fit:'inside',withoutEnlargement:true}).webp({quality:85}).toBuffer(); }catch{ out=null; }
+    try{ out=await toSharp(im.data).resize({width:1600,height:1600,fit:'inside',withoutEnlargement:true}).webp({quality:85}).toBuffer(); }catch{ out=null; }
     const name=out?nm:im.filename; fs.writeFileSync(path.join(od,'images',name), out||im.data); rename[im.filename]=name; b+=(out||im.data).length; }
   const fixImg=md=>md.replace(/image_\d+\.[a-z]+/g,m=>rename[m]||m.replace(/\.[a-z]+$/,'.webp'));
   for(const [name] of OUTS){ fs.writeFileSync(path.join(od,name+'.md'), finishMd(fixImg(raw[name]))); try{ fs.rmSync(path.join(od,name+'.원본표.md'),{force:true}); }catch{} }
